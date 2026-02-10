@@ -2,8 +2,10 @@ CGO_CFLAGS = -I/usr/include/SDL3
 TAGS = sdl3
 
 build:
-	CGO_CFLAGS="$(CGO_CFLAGS)" go build -tags $(TAGS) -o raylib_test .
+	CGO_CFLAGS="$(CGO_CFLAGS)" go build -tags $(TAGS) -o ecstest .
 
 run: build
-	./raylib_test
+	./ecstest
 
+profile: build
+	samply record ./ecstest
