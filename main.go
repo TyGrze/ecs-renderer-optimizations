@@ -3,12 +3,16 @@ package main
 import (
 	"flag"
 	"math/rand/v2"
+	"time"
 
 	rl "github.com/gen2brain/raylib-go/raylib"
 	"github.com/mlange-42/ark/ecs"
 )
 
-var debugMode bool
+var (
+	debugMode  bool
+	stressMode bool
+)
 
 const (
 	title        = "ECS Test"
@@ -20,6 +24,7 @@ const (
 
 func main() {
 	flag.BoolVar(&debugMode, "debug", false, "enable debug overlay")
+	flag.BoolVar(&stressMode, "stress", false, "burn CPU cycles to test frame timings")
 	flag.Parse()
 
   // Window setup
@@ -57,24 +62,51 @@ func main() {
 	}
 
 	for !rl.WindowShouldClose() {
+		frameStart := time.Now()
 		dt := rl.GetFrameTime()
 
+		// Update phase (CPU)
+		updateStart := time.Now()
 		camera.Update(dt)
 		camera.UpdateBounds(&cameraBounds)
+    
+		if stressMode {
+			// Busy-wait ~2ms to make CPU time visible in debug overlay
+			burnUntil := time.Now().Add(2 * time.Millisecond)
+			for time.Now().Before(burnUntil) {
+			}
+		}
 
+		updateTime := time.Since(updateStart)
+
+		// Draw phase (CPU draw call submission)
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.Gray)
 
+		drawStart := time.Now()
 		rl.BeginMode2D(camera.Cam)
 		spriteRenderer.Update(world)
 		rl.EndMode2D()
+		drawTime := time.Since(drawStart)
 
 		if debugOverlay != nil {
 			debugOverlay.Draw(spriteRenderer)
 		}
 
 		rl.DrawFPS(int32(rl.GetScreenWidth())-100, 10)
-		rl.EndDrawing()
 
+		// Present phase (GPU flush + vsync)
+		presentStart := time.Now()
+		rl.EndDrawing()
+		presentTime := time.Since(presentStart)
+
+		if debugOverlay != nil {
+			debugOverlay.Timings = FrameTimings{
+				Update:  float64(updateTime.Microseconds()) / 1000.0,
+				Draw:    float64(drawTime.Microseconds()) / 1000.0,
+				Present: float64(presentTime.Microseconds()) / 1000.0,
+				Total:   float64(time.Since(frameStart).Microseconds()) / 1000.0,
+			}
+		}
 	}
 }
