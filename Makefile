@@ -5,7 +5,7 @@ build:
 	CGO_CFLAGS="$(CGO_CFLAGS)" go build -tags $(TAGS) -o ecstest .
 
 run: build
-	./ecstest
+	./ecstest --debug
 
 profile: build
 	samply record ./ecstest

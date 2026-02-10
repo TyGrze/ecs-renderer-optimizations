@@ -1,11 +1,14 @@
 package main
 
 import (
+	"flag"
 	"math/rand/v2"
 
 	rl "github.com/gen2brain/raylib-go/raylib"
 	"github.com/mlange-42/ark/ecs"
 )
+
+var debugMode bool
 
 const (
 	title        = "ECS Test"
@@ -16,6 +19,10 @@ const (
 )
 
 func main() {
+	flag.BoolVar(&debugMode, "debug", false, "enable debug overlay")
+	flag.Parse()
+
+  // Window setup
 	rl.SetConfigFlags(rl.FlagWindowHighdpi)
 	rl.InitWindow(screenWidth, screenHeight, title)
 	defer rl.CloseWindow()
@@ -33,6 +40,11 @@ func main() {
 	spriteRenderer := NewSpriteRenderer(world, sheet)
 
 	camera := NewCamera()
+
+	var debugOverlay *DebugOverlay
+	if debugMode {
+		debugOverlay = NewDebugOverlay(world, &camera, &cameraBounds)
+	}
 
 	// Create entities
 	for range entityCount {
@@ -56,6 +68,10 @@ func main() {
 		rl.BeginMode2D(camera.Cam)
 		spriteRenderer.Update(world)
 		rl.EndMode2D()
+
+		if debugOverlay != nil {
+			debugOverlay.Draw(spriteRenderer)
+		}
 
 		rl.DrawFPS(int32(rl.GetScreenWidth())-100, 10)
 		rl.EndDrawing()

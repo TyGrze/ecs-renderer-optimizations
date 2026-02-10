@@ -9,7 +9,8 @@ type SpriteRenderer struct {
 	filter       *ecs.Filter2[Position, Sprite]
 	cameraBounds *ecs.Resource[CameraBounds]
 
-	sheet rl.Texture2D
+	sheet         rl.Texture2D
+	RenderedCount int
 }
 
 func NewSpriteRenderer(w *ecs.World, sheet rl.Texture2D) *SpriteRenderer {
@@ -23,6 +24,7 @@ func NewSpriteRenderer(w *ecs.World, sheet rl.Texture2D) *SpriteRenderer {
 }
 
 func (s *SpriteRenderer) Update(w *ecs.World) {
+	s.RenderedCount = 0
 	query := s.filter.Query()
 	cameraBound := s.cameraBounds.Get()
 
@@ -40,6 +42,7 @@ func (s *SpriteRenderer) Update(w *ecs.World) {
 			continue
 		}
 
+		s.RenderedCount++
 		rl.DrawTextureRec(s.sheet, rl.NewRectangle(float32(sprite.X*32), float32(sprite.Y*32), 32, 32),
 			rl.NewVector2(float32(pos.X), float32(pos.Y)), rl.White)
 	}
