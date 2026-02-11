@@ -67,8 +67,8 @@ func (d *DebugOverlay) refresh(sr *SpriteRenderer) {
 
 		{"--- Camera ---", yellow},
 		{fmt.Sprintf("Target X: %.1f", d.camera.Cam.Target.X), green},
-		{fmt.Sprintf("Target Y: %.1f", d.camera.Cam.Target.Y), green},
-		{fmt.Sprintf("Zoom: %.2f", d.camera.Cam.Zoom), green},
+		{fmt.Sprintf("Target Y: %.1f", d.camera.Cam.Target.Z), green},
+		{fmt.Sprintf("Zoom: %.2f", d.camera.Zoom), green},
 		{fmt.Sprintf("Bounds: (%.0f,%.0f)-(%.0f,%.0f)", d.bounds.MinX, d.bounds.MinY, d.bounds.MaxX, d.bounds.MaxY), green},
 
 		{"--- Entities ---", yellow},

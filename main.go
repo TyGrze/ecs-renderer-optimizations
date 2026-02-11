@@ -35,14 +35,19 @@ func main() {
 
 	// ECS Init
 	world := ecs.NewWorld()
-	mapper := ecs.NewMap2[Position, Sprite](world)
+	mapper := ecs.NewMap3[Position, Velocity, Sprite](world)
 	cameraBounds := CameraBounds{}
 	ecs.AddResource(world, &cameraBounds)
 
 	sheet := GenerateSpritesheet()
 	defer rl.UnloadTexture(sheet)
 
+  // Setup Rendere System
 	spriteRenderer := NewSpriteRenderer(world, sheet)
+	defer spriteRenderer.Unload()
+
+  // Setup Movement System
+  movementSystem := NewMovementSystem(world)
 
 	camera := NewCamera()
 
@@ -57,6 +62,7 @@ func main() {
 		rany := rand.Float32() * spawnRange
 		_ = mapper.NewEntity(
 			&Position{X: ranx, Y: rany},
+      &Velocity{X: rand.Float32()*2 - 1, Y: rand.Float32()*2 - 1},
 			&Sprite{X: int32(ranx) % 4, Y: int32(rany) % 4},
 		)
 	}
@@ -84,9 +90,10 @@ func main() {
 		rl.ClearBackground(rl.Gray)
 
 		drawStart := time.Now()
-		rl.BeginMode2D(camera.Cam)
+		rl.BeginMode3D(camera.Cam)
 		spriteRenderer.Update(world)
-		rl.EndMode2D()
+    movementSystem.Update(world)
+		rl.EndMode3D()
 		drawTime := time.Since(drawStart)
 
 		if debugOverlay != nil {

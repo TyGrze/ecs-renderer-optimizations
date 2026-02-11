@@ -10,52 +10,69 @@ const (
 )
 
 type Camera struct {
-	Cam rl.Camera2D
+	Cam  rl.Camera3D
+	Zoom float32
 }
 
 func NewCamera() Camera {
+	sw := float32(rl.GetScreenWidth())
+	sh := float32(rl.GetScreenHeight())
 	return Camera{
-		Cam: rl.Camera2D{
-			Target: rl.NewVector2(0, 0),
-			Zoom:   1.0,
-			Offset: rl.NewVector2(float32(rl.GetScreenWidth())/2, float32(rl.GetScreenHeight())/2),
+		Cam: rl.Camera3D{
+			Position:   rl.NewVector3(sw/2, 10, sh/2),
+			Target:     rl.NewVector3(sw/2, 0, sh/2),
+			Up:         rl.NewVector3(0, 0, -1),
+			Fovy:       sh,
+			Projection: rl.CameraOrthographic,
 		},
+		Zoom: 1.0,
 	}
 }
 
 func (c *Camera) Update(dt float32) {
-	// Camera pan with WASD
+	speed := panSpeed * dt / c.Zoom
+
 	if rl.IsKeyDown(rl.KeyW) {
-		c.Cam.Target.Y -= panSpeed * dt / c.Cam.Zoom
+		c.Cam.Position.Z -= speed
+		c.Cam.Target.Z -= speed
 	}
 	if rl.IsKeyDown(rl.KeyS) {
-		c.Cam.Target.Y += panSpeed * dt / c.Cam.Zoom
+		c.Cam.Position.Z += speed
+		c.Cam.Target.Z += speed
 	}
 	if rl.IsKeyDown(rl.KeyA) {
-		c.Cam.Target.X -= panSpeed * dt / c.Cam.Zoom
+		c.Cam.Position.X -= speed
+		c.Cam.Target.X -= speed
 	}
 	if rl.IsKeyDown(rl.KeyD) {
-		c.Cam.Target.X += panSpeed * dt / c.Cam.Zoom
+		c.Cam.Position.X += speed
+		c.Cam.Target.X += speed
 	}
 
-	// Zoom mousewheel
 	wheel := rl.GetMouseWheelMove()
 	if wheel != 0 {
-		c.Cam.Zoom += wheel * zoomSpeed
-		if c.Cam.Zoom < zoomMin {
-			c.Cam.Zoom = zoomMin
+		c.Zoom += wheel * zoomSpeed
+		if c.Zoom < zoomMin {
+			c.Zoom = zoomMin
 		}
-		if c.Cam.Zoom > zoomMax {
-			c.Cam.Zoom = zoomMax
+		if c.Zoom > zoomMax {
+			c.Zoom = zoomMax
 		}
 	}
+
+	c.Cam.Fovy = float32(rl.GetScreenHeight()) / c.Zoom
 }
 
 func (c *Camera) UpdateBounds(bounds *CameraBounds) {
-	topLeft := rl.GetScreenToWorld2D(rl.NewVector2(0, 0), c.Cam)
-	botRight := rl.GetScreenToWorld2D(rl.NewVector2(float32(rl.GetScreenWidth()), float32(rl.GetScreenHeight())), c.Cam)
-	bounds.MinX = topLeft.X
-	bounds.MinY = topLeft.Y
-	bounds.MaxX = botRight.X
-	bounds.MaxY = botRight.Y
+	halfH := c.Cam.Fovy / 2
+	aspect := float32(rl.GetScreenWidth()) / float32(rl.GetScreenHeight())
+	halfW := halfH * aspect
+
+	cx := c.Cam.Target.X
+	cz := c.Cam.Target.Z
+
+	bounds.MinX = cx - halfW
+	bounds.MaxX = cx + halfW
+	bounds.MinY = cz - halfH
+	bounds.MaxY = cz + halfH
 }
