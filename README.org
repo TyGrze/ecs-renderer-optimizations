@@ -52,7 +52,7 @@ This cut draw calls to only what's on screen (~hundreds at typical zoom), freein
 
 ** Step 3: GPU Instanced Rendering (200K Entities, 1 Draw Call)
 
-The architectural turning point. Replaced per-entity =DrawTextureRec= calls with a single =DrawMeshInstanced= call. All visible entities are batched into an array of 4x4 transform matrices and drawn in one GPU submission.
+Replaced per-entity =DrawTextureRec= calls with a single =DrawMeshInstanced= call. All visible entities are batched into an array of 4x4 transform matrices and drawn in one GPU submission.
 
 Switched from Camera2D to Camera3D (orthographic) to support the instancing pipeline. The sprite index is encoded into an unused matrix element (=M5=) and extracted in the vertex shader.
 
