@@ -46,7 +46,7 @@ func NewDebugOverlay(world *ecs.World, camera *Camera, bounds *CameraBounds) *De
 	}
 }
 
-func (d *DebugOverlay) refresh(sr *SpriteRenderer) {
+func (d *DebugOverlay) refresh(sr *SpriteRendererSystem) {
 	yellow := rl.NewColor(255, 215, 0, 255)  // #FFD700
 	green := rl.NewColor(0, 204, 122, 255)    // #00CC7A
 	white := rl.NewColor(191, 191, 191, 255)  // #BFBFBF
@@ -89,7 +89,7 @@ func (d *DebugOverlay) refresh(sr *SpriteRenderer) {
 	}
 }
 
-func (d *DebugOverlay) Draw(sr *SpriteRenderer) {
+func (d *DebugOverlay) Draw(sr *SpriteRendererSystem) {
 	now := time.Now()
 	if d.cached == nil || now.Sub(d.lastRefresh) >= refreshInterval {
 		d.refresh(sr)

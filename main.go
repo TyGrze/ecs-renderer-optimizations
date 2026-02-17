@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"math/rand/v2"
 	"time"
@@ -18,7 +19,7 @@ const (
 	title        = "ECS Test"
 	screenWidth  = 1280
 	screenHeight = 720
-	entityCount  = 200000
+	entityCount  = 400000
 	spawnRange   = 20000
 )
 
@@ -27,7 +28,7 @@ func main() {
 	flag.BoolVar(&stressMode, "stress", false, "burn CPU cycles to test frame timings")
 	flag.Parse()
 
-  // Window setup
+	// Window setup
 	rl.SetConfigFlags(rl.FlagWindowHighdpi)
 	rl.InitWindow(screenWidth, screenHeight, title)
 	defer rl.CloseWindow()
@@ -42,12 +43,14 @@ func main() {
 	sheet := GenerateSpritesheet()
 	defer rl.UnloadTexture(sheet)
 
-  // Setup Rendere System
-	spriteRenderer := NewSpriteRenderer(world, sheet)
+	// Setup Rendere System
+	trippleEntityBuffer := NewTrippleEntityBuffer(entityCount)
+	spriteRenderer := NewSpriteRenderer(trippleEntityBuffer, sheet)
+	SpriteRendererSystem := NewSpriteRendererSystem(world, trippleEntityBuffer)
 	defer spriteRenderer.Unload()
 
-  // Setup Movement System
-  movementSystem := NewMovementSystem(world)
+	// Setup Movement System
+	movementSystem := NewMovementSystem(world)
 
 	camera := NewCamera()
 
@@ -62,10 +65,16 @@ func main() {
 		rany := rand.Float32() * spawnRange
 		_ = mapper.NewEntity(
 			&Position{X: ranx, Y: rany},
-      &Velocity{X: rand.Float32()*2 - 1, Y: rand.Float32()*2 - 1},
+			&Velocity{X: rand.Float32()*2 - 1, Y: rand.Float32()*2 - 1},
 			&Sprite{X: int32(ranx) % 4, Y: int32(rany) % 4},
 		)
 	}
+
+	// Start ECS go routing
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go StartECSLoop(ctx, 60, world, SpriteRendererSystem.Update)
 
 	for !rl.WindowShouldClose() {
 		frameStart := time.Now()
@@ -75,7 +84,7 @@ func main() {
 		updateStart := time.Now()
 		camera.Update(dt)
 		camera.UpdateBounds(&cameraBounds)
-    
+
 		if stressMode {
 			// Busy-wait ~2ms to make CPU time visible in debug overlay
 			burnUntil := time.Now().Add(2 * time.Millisecond)
@@ -91,15 +100,16 @@ func main() {
 
 		drawStart := time.Now()
 		rl.BeginMode3D(camera.Cam)
-		spriteRenderer.Update(world)
-    movementSystem.Update(world)
+		spriteRenderer.Render()
+		movementSystem.Update(world)
 		rl.EndMode3D()
 		drawTime := time.Since(drawStart)
 
 		if debugOverlay != nil {
-			debugOverlay.Draw(spriteRenderer)
+			debugOverlay.Draw(SpriteRendererSystem)
 		}
 
+    rl.DrawRectangle(int32(rl.GetScreenWidth())-100, 10, 75, 20, rl.Black)
 		rl.DrawFPS(int32(rl.GetScreenWidth())-100, 10)
 
 		// Present phase (GPU flush + vsync)
@@ -114,6 +124,26 @@ func main() {
 				Present: float64(presentTime.Microseconds()) / 1000.0,
 				Total:   float64(time.Since(frameStart).Microseconds()) / 1000.0,
 			}
+		}
+	}
+}
+
+// For now we are just using this for the renderer. We will probably need to create a real ecs manager in the future
+func StartECSLoop(ctx context.Context, tps int, w *ecs.World, updaet func(w *ecs.World)) {
+	tick := time.NewTicker(time.Second / time.Duration(tps))
+	defer tick.Stop()
+
+	last := time.Now()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-tick.C:
+      // Not using dt RN but might add it back
+			_ = now.Sub(last).Seconds()
+			last = now
+			updaet(w)
 		}
 	}
 }
