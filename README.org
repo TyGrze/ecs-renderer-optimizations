@@ -1,0 +1,221 @@
+#+TITLE: ECS Renderer Optimization Journey
+#+DESCRIPTION: Scaling a Go ECS + Raylib renderer from 100K to 1 million entities
+
+* Overview
+
+This project documents the step-by-step optimization of a 2D sprite renderer built with Go, [[https://github.com/mlange-42/ark][Ark ECS]], and [[https://github.com/gen2brain/raylib-go][raylib-go]]. Starting from a naive immediate-mode renderer drawing 100K entities, each iteration targets a specific bottleneck until the final version renders *1 million entities* with a single draw call, lock-free triple buffering, and direct OpenGL control.
+
+** Tech Stack
+
+| Component | Details                        |
+|-----------+--------------------------------|
+| Language  | Go 1.25                        |
+| ECS       | Ark v0.7.1                     |
+| Graphics  | raylib-go + direct rlgl/OpenGL |
+| Platform  | Arch Linux, AMD Radeon 860M    |
+| Window    | 1280x720 @ 120 FPS target      |
+
+* Optimization Timeline
+
+** Step 1: Immediate-Mode Baseline (100K Entities)
+
+The starting point: one =DrawTextureRec= call *per entity, per frame*.
+
+#+begin_src go
+query := filter.Query()
+for query.Next() {
+    pos, sprite := query.Get()
+    rl.DrawTextureRec(sheet, rl.NewRectangle(...), ...)
+}
+#+end_src
+
+At full zoom this means 100K+ individual draw calls, each one triggering GPU state changes. The CPU spends nearly all its time submitting draws.
+
+- *Draw calls:* O(n visible)
+- *Bottleneck:* CPU draw-call submission overhead
+
+** Step 2: Frustum Culling (200K Entities)
+
+Added an AABB frustum cull so off-screen entities are skipped entirely. The camera computes its visible bounds each frame and only entities within that rectangle are drawn.
+
+#+begin_src go
+bounds := camera.ComputeBounds()
+if pos.X+CellSize < bounds.MinX || pos.X > bounds.MaxX {
+    continue
+}
+#+end_src
+
+This cut draw calls to only what's on screen (~hundreds at typical zoom), freeing enough CPU headroom to double the entity count to 200K.
+
+- *Draw calls:* O(n visible in frustum)
+- *Improvement:* Eliminated all off-screen draw overhead
+
+** Step 3: GPU Instanced Rendering (200K Entities, 1 Draw Call)
+
+The architectural turning point. Replaced per-entity =DrawTextureRec= calls with a single =DrawMeshInstanced= call. All visible entities are batched into an array of 4x4 transform matrices and drawn in one GPU submission.
+
+Switched from Camera2D to Camera3D (orthographic) to support the instancing pipeline. The sprite index is encoded into an unused matrix element (=M5=) and extracted in the vertex shader.
+
+#+begin_src go
+transform := rl.MatrixMultiply(scale, translate)
+transform.M5 = float32(sprite.Y*GridCols + sprite.X) // encode sprite index
+transforms[count] = transform
+
+rl.DrawMeshInstanced(mesh, material, transforms[:count], count)
+#+end_src
+
+- *Draw calls:* 1 per frame
+- *GPU bandwidth:* 64 bytes per entity (full 4x4 matrix)
+- *Improvement:* Orders of magnitude fewer state changes
+
+** Step 4: Triple-Buffered Concurrency (400K Entities)
+
+Decoupled the ECS simulation from the render loop. The ECS update runs on a background goroutine at a fixed 60Hz tick rate, while the main thread renders independently at up to 120Hz.
+
+A lock-free triple buffer using atomic CAS operations passes entity data between threads without mutexes or blocking:
+
+#+begin_src go
+// Producer (ECS goroutine, 60Hz)
+tb.SwapWriter() // atomically publish new data
+
+// Consumer (render thread, 120Hz)
+if tb.SwapReader() { // atomically grab latest data if available
+    instances := tb.ReadBuffer()
+    // upload to GPU...
+}
+#+end_src
+
+Also switched from =MatrixMultiply(scale, translate)= to direct struct initialization, eliminating intermediate matrix allocations per entity.
+
+- *Draw calls:* 1 per frame
+- *Improvement:* Render thread never blocks on ECS, doubled entity count to 400K
+
+** Step 5: Direct OpenGL Control (800K Entities)
+
+This was the biggest single optimization, and it required *upstream changes to raylib-go*.
+
+*** The Problem: CPU-Bound in raylib Internals
+
+Profiling with [[https://github.com/mstange/samply][samply]] revealed that *80% of CPU time* was spent inside raylib's =DrawMeshInstanced=:
+
+- *60%* converting =Matrix4x4= structs to float arrays (type conversion overhead)
+- *20%* in =malloc/free= because =DrawMeshInstanced= creates and destroys the VBO every single frame
+
+[[https://github.com/user-attachments/assets/d4b7066d-f7a3-4de1-80ae-38d4510ee8a9]]
+
+/Flame graph from [[https://github.com/gen2brain/raylib-go/pull/537][raylib-go PR #537]] showing CPU time dominated by DrawMeshInstanced internals./
+
+*** The Solution: Upstream PR to raylib-go
+
+To bypass these bottlenecks, I needed direct access to OpenGL's vertex buffer management functions, which raylib-go didn't expose. I opened [[https://github.com/gen2brain/raylib-go/pull/537][PR #537]] to add Go bindings for:
+
+- =LoadVertexBuffer=, =UpdateVertexBuffer= -- create and stream VBO data
+- =LoadVertexBufferElements= -- index buffers (EBO)
+- =SetVertexAttribute=, =SetVertexAttributeDivisor= -- configure VAO bindings
+- =DrawVertexArrayElementsInstanced= -- instanced draw calls
+
+The PR was merged and enabled the following optimizations.
+
+*** The Result: 8x Bandwidth Reduction
+
+With direct VBO control, the renderer was completely redesigned:
+
+1. *Replaced 64-byte matrices with 8-byte position vectors* -- an 8x reduction in per-entity GPU bandwidth
+2. *Reuse VBOs across frames* -- just =UpdateVertexBuffer= instead of alloc/free every frame
+3. *Eliminated all type conversion* -- data goes straight to the GPU in the format it needs
+
+#+begin_src go
+// Before: 64 bytes per entity, alloc+free every frame
+rl.DrawMeshInstanced(mesh, material, transforms, count)
+
+// After: 8 bytes per entity, VBO reused across frames
+rl.UpdateVertexBuffer(instanceVBO, positions, 0)
+rl.DrawVertexArrayElementsInstanced(0, 6, nil, visibleCount)
+#+end_src
+
+- *Draw calls:* 1 per frame
+- *GPU bandwidth:* 8 bytes per entity (down from 64)
+- *Improvement:* Eliminated all CPU-side bottlenecks, scaled to 800K entities
+
+** Step 6: ECS-Side Frustum Culling + Merged VBO (1 Million Entities, 400K Visable)
+
+The final optimization moved frustum culling from the GPU back to the ECS goroutine and merged all per-instance data into a single VBO.
+
+Instead of uploading all 800K+ entity positions and letting the GPU clip them, the ECS goroutine now performs AABB culling and only writes *visible* entities to the triple buffer. Camera bounds are shared between threads via =atomic.Pointer=.
+
+#+begin_src go
+// ECS goroutine: only visible entities make it to the buffer
+bounds := s.cameraBounds.Load()
+if pos.X < minX || pos.X > maxX || pos.Y < minY || pos.Y > maxY {
+    continue
+}
+*buf = append(*buf, InstanceData{
+    X:           pos.X,
+    Y:           pos.Y,
+    SpriteIndex: float32(sprite.Y*GridCols + sprite.X),
+})
+#+end_src
+
+Position and sprite index are packed into a single =vec3= per instance (12 bytes), uploaded as one contiguous VBO, and consumed by the vertex shader directly.
+
+- *Draw calls:* 1 per frame
+- *GPU bandwidth:* 12 bytes x visible count only
+- *Improvement:* Minimal GPU bandwidth, scaled to 1 million entities
+
+* Performance Summary
+
+| Step | Entities | Draw Calls | GPU Bytes/Entity | Key Change |
+|------+----------+------------+------------------+------------------------------|
+|    1 | 100K     | O(n)       | ~64              | Immediate-mode baseline      |
+|    2 | 200K     | O(n)       | ~64              | Frustum culling              |
+|    3 | 200K     | 1          | 64               | GPU instanced rendering      |
+|    4 | 400K     | 1          | 64               | Triple-buffered concurrency  |
+|    5 | 800K     | 1          | 8                | Direct OpenGL (PR #537)      |
+|    6 | 1M       | 1          | 12 (visible only)| ECS-side culling + merged VBO|
+
+* Architecture
+
+#+begin_example
+ECS Goroutine (60Hz)                    Main Thread (120Hz)
+┌───────────────────────┐               ┌──────────────────────┐
+│  MovementSystem       │               │  Camera Update       │
+│  ├── Update positions │               │  ├── WASD panning    │
+│                       │               │  └── Mouse zoom      │
+│  SpriteRendererSystem │               │                      │
+│  ├── Load cam bounds  │  lock-free    │  SpriteRenderer      │
+│  ├── AABB cull        ├──────────────►│  ├── SwapReader()    │
+│  ├── Pack InstanceData│ triple buffer │  ├── UpdateVBO       │
+│  └── SwapWriter()     │               │  └── DrawInstanced   │
+└───────────────────────┘               └──────────────────────┘
+#+end_example
+
+** File Structure
+
+| File             | Purpose                                       |
+|------------------+-----------------------------------------------|
+| =main.go=        | Entry point, window setup, ECS goroutine      |
+| =renderer.go=    | Triple buffer, VAO/VBO setup, instanced draw  |
+| =camera.go=      | Orthographic camera, frustum bounds           |
+| =component.go=   | ECS components (Position, Velocity, Sprite)   |
+| =movement.go=    | Movement system (velocity integration)        |
+| =spritesheet.go= | Procedural 4x4 sprite atlas generation        |
+| =debug.go=       | Optional debug overlay (frame timings, stats) |
+| =shaders/=       | GLSL vertex + fragment shaders for instancing |
+
+* Building & Running
+
+#+begin_src bash
+make build          # Build the binary
+make run            # Build and run with debug overlay
+./ecstest           # Run without debug overlay
+./ecstest --stress  # Run with CPU stress test for timing visibility
+make profile        # Profile with samply
+#+end_src
+
+* Upstream Contribution
+
+This project required adding rlgl vertex buffer bindings to [[https://github.com/gen2brain/raylib-go][raylib-go]] that didn't previously exist.
+
+*PR:* [[https://github.com/gen2brain/raylib-go/pull/537][gen2brain/raylib-go#537 - Add rlgl vertex draw bindings]] (Merged)
+
+The PR adds Go bindings for low-level OpenGL operations (VBO/VAO/EBO management, instanced draw calls) for both the cgo and purego backends, along with examples demonstrating indexed and instanced draws.
