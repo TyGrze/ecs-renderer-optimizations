@@ -73,7 +73,7 @@ func (d *DebugOverlay) refresh(sr *SpriteRendererSystem) {
 
 		{"--- Entities ---", yellow},
 		{fmt.Sprintf("Total Alive: %d", stats.Entities.Used), green},
-		{fmt.Sprintf("Rendered:    %d", sr.RenderedCount), green},
+		{fmt.Sprintf("Instances:   %d", sr.RenderedCount), green},
 
 		{"--- ECS World ---", yellow},
 		{fmt.Sprintf("Alive:     %d", stats.Entities.Used), white},

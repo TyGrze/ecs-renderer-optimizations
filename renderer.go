@@ -1,6 +1,8 @@
 package main
 
 import (
+	"log"
+	"os"
 	"sync/atomic"
 
 	rl "github.com/gen2brain/raylib-go/raylib"
@@ -13,8 +15,7 @@ const (
 )
 
 type TrippleEntityBuffer struct {
-	buffers [3][]rl.Matrix
-	counts  [3]int
+	buffers [3][]rl.Vector2
 	middle  atomic.Uint32
 	wrIdx   uint32
 	rdIdx   uint32
@@ -23,7 +24,7 @@ type TrippleEntityBuffer struct {
 func NewTrippleEntityBuffer(capacity int) *TrippleEntityBuffer {
 	tb := &TrippleEntityBuffer{}
 	for i := range tb.buffers {
-		tb.buffers[i] = make([]rl.Matrix, capacity)
+		tb.buffers[i] = make([]rl.Vector2, 0, capacity)
 	}
 	tb.wrIdx = 0
 	tb.middle.Store(1)
@@ -32,11 +33,11 @@ func NewTrippleEntityBuffer(capacity int) *TrippleEntityBuffer {
 	return tb
 }
 
-func (tb *TrippleEntityBuffer) WriteBuffer() *[]rl.Matrix {
+func (tb *TrippleEntityBuffer) WriteBuffer() *[]rl.Vector2 {
 	return &tb.buffers[tb.wrIdx]
 }
 
-func (tb *TrippleEntityBuffer) ReadBuffer() []rl.Matrix {
+func (tb *TrippleEntityBuffer) ReadBuffer() []rl.Vector2 {
 	return tb.buffers[tb.rdIdx]
 }
 
@@ -61,108 +62,185 @@ func (tb *TrippleEntityBuffer) SwapReader() bool {
 	}
 }
 
-type SpriteRenderer struct {
-	shader   rl.Shader
-	mesh     rl.Mesh
-	material rl.Material
+// QuadVertex matches the interleaved VBO layout: vec3 position + vec2 texcoord
+type QuadVertex struct {
+	Pos rl.Vector3
+	Tex rl.Vector2
+}
 
-	tb *TrippleEntityBuffer
+type SpriteRenderer struct {
+	shaderID    uint32
+	vao         uint32
+	quadVBO     uint32
+	ebo         uint32
+	spriteVBO   uint32 // static — sprite indices, set once
+	positionVBO uint32 // dynamic — positions, updated per frame
+	mvpLoc      int32
+	cellSizeLoc int32
+	textureLoc  int32
+	texture     rl.Texture2D
+	entityCount int32
+	tb          *TrippleEntityBuffer
 }
 
 type SpriteRendererSystem struct {
-	filter       *ecs.Filter2[Position, Sprite]
-	cameraBounds *ecs.Resource[CameraBounds]
-
+	filter        *ecs.Filter2[Position, Sprite]
 	tb            *TrippleEntityBuffer
 	RenderedCount int
 }
 
 func NewSpriteRendererSystem(w *ecs.World, tb *TrippleEntityBuffer) *SpriteRendererSystem {
 	filter := ecs.NewFilter2[Position, Sprite](w)
-	cameraRes := ecs.NewResource[CameraBounds](w)
 
 	return &SpriteRendererSystem{
-		filter:       filter,
-		cameraBounds: &cameraRes,
-		tb:           tb,
+		filter: filter,
+		tb:     tb,
 	}
 }
 
 func (s *SpriteRendererSystem) Update(w *ecs.World) {
-	s.RenderedCount = 0
-	query := s.filter.Query()
-	cameraBound := s.cameraBounds.Get()
-
-	minX := cameraBound.MinX
-	minY := cameraBound.MinY
-	maxX := cameraBound.MaxX
-	maxY := cameraBound.MaxY
-
 	buf := s.tb.WriteBuffer()
-	*buf = (*buf)[:0] // Reset length but keeps capacity
+	*buf = (*buf)[:0]
 
+	query := s.filter.Query()
 	for query.Next() {
-		pos, sprite := query.Get()
-
-    // Simple AABB Culling
-		if pos.X+CellSize < minX || pos.X > maxX ||
-			pos.Y+CellSize < minY || pos.Y > maxY {
-			continue
-		}
-
-		// Direct matrix construction - equivalent to MatrixMultiply(Scale, Translate)
-		// but avoids 2 matrix builds + a full 4x4 multiply per entity.
-		*buf = append(*buf, rl.Matrix{
-			M0:  CellSize,
-			M5:  float32(sprite.Y*GridCols + sprite.X), // sprite index encoded for shader
-			M10: CellSize,
-			M12: pos.X + CellSize/2,
-			M14: pos.Y + CellSize/2,
-			M15: 1,
-		})
-		s.RenderedCount++
+		pos, _ := query.Get()
+		*buf = append(*buf, rl.NewVector2(pos.X, pos.Y))
 	}
 
-	// Publihs the transforms
-	s.tb.counts[s.tb.wrIdx] = s.RenderedCount
+	s.RenderedCount = len(*buf)
 	s.tb.SwapWriter()
 }
 
-func NewSpriteRenderer(tb *TrippleEntityBuffer, sheet rl.Texture2D) *SpriteRenderer {
-	shader := rl.LoadShader("shaders/instancing.vs", "")
-	shader.UpdateLocation(rl.ShaderLocMatrixMvp, rl.GetShaderLocation(shader, "mvp"))
-	shader.UpdateLocation(rl.ShaderLocMatrixModel, rl.GetShaderLocationAttrib(shader, "instanceTransform"))
+// BuildSpriteIndices iterates all entities once at startup and returns sprite indices for the static VBO.
+func (s *SpriteRendererSystem) BuildSpriteIndices(w *ecs.World) []float32 {
+	query := s.filter.Query()
+	indices := make([]float32, 0, s.RenderedCount)
 
-	mesh := rl.GenMeshPlane(1, 1, 1, 1)
+	for query.Next() {
+		_, sprite := query.Get()
+		indices = append(indices, float32(sprite.Y*GridCols+sprite.X))
+	}
 
-	material := rl.LoadMaterialDefault()
-	material.Shader = shader
-	material.GetMap(rl.MapDiffuse).Texture = sheet
+	return indices
+}
+
+func NewSpriteRenderer(tb *TrippleEntityBuffer, sheet rl.Texture2D, spriteIndices []float32, entityCount int32) *SpriteRenderer {
+	// Load shader from files
+	vsCode, err := os.ReadFile("shaders/instancing.vs")
+	if err != nil {
+		log.Fatalf("failed to read vertex shader: %v", err)
+	}
+	fsCode, err := os.ReadFile("shaders/instancing.fs")
+	if err != nil {
+		log.Fatalf("failed to read fragment shader: %v", err)
+	}
+	shaderID := rl.LoadShaderCode(string(vsCode), string(fsCode))
+
+	// Get uniform locations
+	mvpLoc := rl.GetLocationUniform(shaderID, "mvp")
+	cellSizeLoc := rl.GetLocationUniform(shaderID, "cellSize")
+	textureLoc := rl.GetLocationUniform(shaderID, "texture0")
+
+	// Set static cellSize uniform
+	rl.EnableShader(shaderID)
+	rl.SetUniform(cellSizeLoc, []float32{CellSize}, int32(rl.ShaderUniformFloat), 1)
+	// Set texture0 sampler to slot 0
+	rl.SetUniform(textureLoc, []int32{0}, int32(rl.ShaderUniformInt), 1)
+	rl.DisableShader()
+
+	// Create VAO
+	vao := rl.LoadVertexArray()
+	rl.EnableVertexArray(vao)
+
+	// Quad geometry: unit quad on XZ plane, Y=0
+	quadVertices := []QuadVertex{
+		{Pos: rl.NewVector3(-0.5, 0, -0.5), Tex: rl.NewVector2(0, 0)},
+		{Pos: rl.NewVector3(0.5, 0, -0.5), Tex: rl.NewVector2(1, 0)},
+		{Pos: rl.NewVector3(-0.5, 0, 0.5), Tex: rl.NewVector2(0, 1)},
+		{Pos: rl.NewVector3(0.5, 0, 0.5), Tex: rl.NewVector2(1, 1)},
+	}
+	quadIndices := []uint16{0, 2, 1, 1, 2, 3}
+
+	// Quad VBO (static) — location 0: vec3 position, location 1: vec2 texcoord
+	quadVBO := rl.LoadVertexBuffer(quadVertices, false)
+	rl.SetVertexAttributes(quadVertices, []rl.VertexAttributesConfig{
+		{Field: "Pos", Attribute: 0},
+		{Field: "Tex", Attribute: 1},
+	})
+
+	// EBO (static)
+	ebo := rl.LoadVertexBufferElements(quadIndices, false)
+
+	// Sprite index VBO (static, divisor=1) — location=2, 1 float per instance
+	spriteVBO := rl.LoadVertexBuffer(spriteIndices, false)
+	rl.SetVertexAttribute(2, 1, rl.Float, false, 4, 0)
+	rl.EnableVertexAttribute(2)
+	rl.SetVertexAttributeDivisor(2, 1)
+
+	// Position VBO (dynamic, divisor=1) — location=3, 2 floats (vec2) per instance
+	positionData := make([]rl.Vector2, entityCount)
+	positionVBO := rl.LoadVertexBuffer(positionData, true)
+	rl.SetVertexAttribute(3, 2, rl.Float, false, 8, 0)
+	rl.EnableVertexAttribute(3)
+	rl.SetVertexAttributeDivisor(3, 1)
+
+	rl.DisableVertexArray()
 
 	return &SpriteRenderer{
-		shader:   shader,
-		mesh:     mesh,
-		material: material,
-		tb:       tb,
+		shaderID:    shaderID,
+		vao:         vao,
+		quadVBO:     quadVBO,
+		ebo:         ebo,
+		spriteVBO:   spriteVBO,
+		positionVBO: positionVBO,
+		mvpLoc:      mvpLoc,
+		cellSizeLoc: cellSizeLoc,
+		textureLoc:  textureLoc,
+		texture:     sheet,
+		entityCount: entityCount,
+		tb:          tb,
 	}
 }
 
 func (s *SpriteRenderer) Unload() {
-	rl.UnloadShader(s.shader)
-	rl.UnloadMesh(&s.mesh)
+	rl.UnloadVertexBuffer(s.quadVBO)
+	rl.UnloadVertexBuffer(s.ebo)
+	rl.UnloadVertexBuffer(s.spriteVBO)
+	rl.UnloadVertexBuffer(s.positionVBO)
+	rl.UnloadShaderProgram(s.shaderID)
 }
 
 func (s *SpriteRenderer) Render() {
-  // If needing to optimize more in the future we can check the bool from SwapReader and if false we could re-use the VBO
-  // But this would require us to create our own OpenGL instancing instead of uring rl
-	s.tb.SwapReader()
-	transforms := s.tb.ReadBuffer()
-	count := s.tb.counts[s.tb.rdIdx]
+	// Flush raylib's internal batch before we take over GL state
+	rl.DrawRenderBatchActive()
 
-  // NOTE: If this needs to be speed up even more I submited a merge request to add rlgl bindings to raylib-go
-  // The slowest part of this RN is in rl, the only way to speed it up more is to deal with the VBO VAO managment and calls ourself
-  // https://github.com/gen2brain/raylib-go/pull/537
-	if count > 0 {
-		rl.DrawMeshInstanced(s.mesh, s.material, transforms[:count], count)
+	rl.EnableShader(s.shaderID)
+
+	// Compute and set MVP
+	mvp := rl.MatrixMultiply(rl.GetMatrixModelview(), rl.GetMatrixProjection())
+	rl.SetUniformMatrix(s.mvpLoc, mvp)
+
+	// Bind texture
+	rl.ActiveTextureSlot(0)
+	rl.EnableTexture(s.texture.ID)
+
+	// Upload new position data if available
+	if s.tb.SwapReader() {
+		positions := s.tb.ReadBuffer()
+		if len(positions) > 0 {
+			rl.UpdateVertexBuffer(s.positionVBO, positions, 0)
+		}
 	}
+
+	// Draw instanced
+	rl.EnableVertexArray(s.vao)
+	rl.DrawVertexArrayElementsInstanced(0, 6, nil, s.entityCount)
+	rl.DisableVertexArray()
+
+	rl.DisableTexture()
+	rl.DisableShader()
+
+	// Restore raylib state
+	rl.DrawRenderBatchActive()
 }

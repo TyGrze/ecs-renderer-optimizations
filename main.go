@@ -19,7 +19,7 @@ const (
 	title        = "ECS Test"
 	screenWidth  = 1280
 	screenHeight = 720
-	entityCount  = 400000
+	entityCount  = 800000
 	spawnRange   = 20000
 )
 
@@ -43,13 +43,9 @@ func main() {
 	sheet := GenerateSpritesheet()
 	defer rl.UnloadTexture(sheet)
 
-	// Setup Rendere System
+	// Setup Systems
 	trippleEntityBuffer := NewTrippleEntityBuffer(entityCount)
-	spriteRenderer := NewSpriteRenderer(trippleEntityBuffer, sheet)
-	SpriteRendererSystem := NewSpriteRendererSystem(world, trippleEntityBuffer)
-	defer spriteRenderer.Unload()
-
-	// Setup Movement System
+	spriteRendererSystem := NewSpriteRendererSystem(world, trippleEntityBuffer)
 	movementSystem := NewMovementSystem(world)
 
 	camera := NewCamera()
@@ -70,11 +66,21 @@ func main() {
 		)
 	}
 
-	// Start ECS go routing
+	// Build static sprite indices before starting ECS loop
+	spriteIndices := spriteRendererSystem.BuildSpriteIndices(world)
+
+	// Create renderer with custom VBO/VAO (runs once)
+	spriteRenderer := NewSpriteRenderer(trippleEntityBuffer, sheet, spriteIndices, entityCount)
+	defer spriteRenderer.Unload()
+
+	// Start ECS goroutine — runs both movement and position copy each tick
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go StartECSLoop(ctx, 60, world, SpriteRendererSystem.Update)
+	go StartECSLoop(ctx, 60, world, func(w *ecs.World) {
+		movementSystem.Update(w)
+		spriteRendererSystem.Update(w)
+	})
 
 	for !rl.WindowShouldClose() {
 		frameStart := time.Now()
@@ -101,15 +107,14 @@ func main() {
 		drawStart := time.Now()
 		rl.BeginMode3D(camera.Cam)
 		spriteRenderer.Render()
-		movementSystem.Update(world)
 		rl.EndMode3D()
 		drawTime := time.Since(drawStart)
 
 		if debugOverlay != nil {
-			debugOverlay.Draw(SpriteRendererSystem)
+			debugOverlay.Draw(spriteRendererSystem)
 		}
 
-    rl.DrawRectangle(int32(rl.GetScreenWidth())-100, 10, 75, 20, rl.Black)
+		rl.DrawRectangle(int32(rl.GetScreenWidth())-100, 10, 75, 20, rl.Black)
 		rl.DrawFPS(int32(rl.GetScreenWidth())-100, 10)
 
 		// Present phase (GPU flush + vsync)
@@ -140,7 +145,7 @@ func StartECSLoop(ctx context.Context, tps int, w *ecs.World, updaet func(w *ecs
 		case <-ctx.Done():
 			return
 		case now := <-tick.C:
-      // Not using dt RN but might add it back
+			// Not using dt RN but might add it back
 			_ = now.Sub(last).Seconds()
 			last = now
 			updaet(w)
