@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"math/rand/v2"
+	"sync/atomic"
 	"time"
 
 	rl "github.com/gen2brain/raylib-go/raylib"
@@ -19,7 +20,7 @@ const (
 	title        = "ECS Test"
 	screenWidth  = 1280
 	screenHeight = 720
-	entityCount  = 800000
+	entityCount  = 1000000
 	spawnRange   = 20000
 )
 
@@ -37,15 +38,17 @@ func main() {
 	// ECS Init
 	world := ecs.NewWorld()
 	mapper := ecs.NewMap3[Position, Velocity, Sprite](world)
-	cameraBounds := CameraBounds{}
-	ecs.AddResource(world, &cameraBounds)
+
+	// Thread-safe camera bounds shared between render thread and ECS goroutine
+	var cameraBounds atomic.Pointer[CameraBounds]
+	cameraBounds.Store(&CameraBounds{})
 
 	sheet := GenerateSpritesheet()
 	defer rl.UnloadTexture(sheet)
 
 	// Setup Systems
 	trippleEntityBuffer := NewTrippleEntityBuffer(entityCount)
-	spriteRendererSystem := NewSpriteRendererSystem(world, trippleEntityBuffer)
+	spriteRendererSystem := NewSpriteRendererSystem(world, trippleEntityBuffer, &cameraBounds)
 	movementSystem := NewMovementSystem(world)
 
 	camera := NewCamera()
@@ -66,11 +69,8 @@ func main() {
 		)
 	}
 
-	// Build static sprite indices before starting ECS loop
-	spriteIndices := spriteRendererSystem.BuildSpriteIndices(world)
-
-	// Create renderer with custom VBO/VAO (runs once)
-	spriteRenderer := NewSpriteRenderer(trippleEntityBuffer, sheet, spriteIndices, entityCount)
+	// Create renderer with custom VBO/VAO
+	spriteRenderer := NewSpriteRenderer(trippleEntityBuffer, sheet, entityCount)
 	defer spriteRenderer.Unload()
 
 	// Start ECS goroutine — runs both movement and position copy each tick
@@ -89,7 +89,7 @@ func main() {
 		// Update phase (CPU)
 		updateStart := time.Now()
 		camera.Update(dt)
-		camera.UpdateBounds(&cameraBounds)
+		cameraBounds.Store(camera.ComputeBounds())
 
 		if stressMode {
 			// Busy-wait ~2ms to make CPU time visible in debug overlay

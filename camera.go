@@ -63,7 +63,7 @@ func (c *Camera) Update(dt float32) {
 	c.Cam.Fovy = float32(rl.GetScreenHeight()) / c.Zoom
 }
 
-func (c *Camera) UpdateBounds(bounds *CameraBounds) {
+func (c *Camera) ComputeBounds() *CameraBounds {
 	halfH := c.Cam.Fovy / 2
 	aspect := float32(rl.GetScreenWidth()) / float32(rl.GetScreenHeight())
 	halfW := halfH * aspect
@@ -71,8 +71,10 @@ func (c *Camera) UpdateBounds(bounds *CameraBounds) {
 	cx := c.Cam.Target.X
 	cz := c.Cam.Target.Z
 
-	bounds.MinX = cx - halfW
-	bounds.MaxX = cx + halfW
-	bounds.MinY = cz - halfH
-	bounds.MaxY = cz + halfH
+	return &CameraBounds{
+		MinX: cx - halfW,
+		MaxX: cx + halfW,
+		MinY: cz - halfH,
+		MaxY: cz + halfH,
+	}
 }

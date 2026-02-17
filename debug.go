@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	rl "github.com/gen2brain/raylib-go/raylib"
@@ -25,7 +26,7 @@ type debugLine struct {
 type DebugOverlay struct {
 	world   *ecs.World
 	camera  *Camera
-	bounds  *CameraBounds
+	bounds  *atomic.Pointer[CameraBounds]
 	Timings FrameTimings
 
 	dpi         int32
@@ -33,7 +34,7 @@ type DebugOverlay struct {
 	cached      []debugLine
 }
 
-func NewDebugOverlay(world *ecs.World, camera *Camera, bounds *CameraBounds) *DebugOverlay {
+func NewDebugOverlay(world *ecs.World, camera *Camera, bounds *atomic.Pointer[CameraBounds]) *DebugOverlay {
 	dpi := int32(rl.GetWindowScaleDPI().X)
 	if dpi < 1 {
 		dpi = 1
@@ -53,6 +54,7 @@ func (d *DebugOverlay) refresh(sr *SpriteRendererSystem) {
 
 	stats := d.world.Stats()
 	t := &d.Timings
+	b := d.bounds.Load()
 
 	d.cached = []debugLine{
 		{"--- Frame Timing ---", yellow},
@@ -69,7 +71,7 @@ func (d *DebugOverlay) refresh(sr *SpriteRendererSystem) {
 		{fmt.Sprintf("Target X: %.1f", d.camera.Cam.Target.X), green},
 		{fmt.Sprintf("Target Y: %.1f", d.camera.Cam.Target.Z), green},
 		{fmt.Sprintf("Zoom: %.2f", d.camera.Zoom), green},
-		{fmt.Sprintf("Bounds: (%.0f,%.0f)-(%.0f,%.0f)", d.bounds.MinX, d.bounds.MinY, d.bounds.MaxX, d.bounds.MaxY), green},
+		{fmt.Sprintf("Bounds: (%.0f,%.0f)-(%.0f,%.0f)", b.MinX, b.MinY, b.MaxX, b.MaxY), green},
 
 		{"--- Entities ---", yellow},
 		{fmt.Sprintf("Total Alive: %d", stats.Entities.Used), green},

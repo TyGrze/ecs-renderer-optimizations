@@ -14,8 +14,14 @@ const (
 	indexMask = 0b011
 )
 
+// InstanceData holds per-instance data: world position + sprite index.
+type InstanceData struct {
+	X, Y        float32
+	SpriteIndex float32
+}
+
 type TrippleEntityBuffer struct {
-	buffers [3][]rl.Vector2
+	buffers [3][]InstanceData
 	middle  atomic.Uint32
 	wrIdx   uint32
 	rdIdx   uint32
@@ -24,7 +30,7 @@ type TrippleEntityBuffer struct {
 func NewTrippleEntityBuffer(capacity int) *TrippleEntityBuffer {
 	tb := &TrippleEntityBuffer{}
 	for i := range tb.buffers {
-		tb.buffers[i] = make([]rl.Vector2, 0, capacity)
+		tb.buffers[i] = make([]InstanceData, 0, capacity)
 	}
 	tb.wrIdx = 0
 	tb.middle.Store(1)
@@ -33,11 +39,11 @@ func NewTrippleEntityBuffer(capacity int) *TrippleEntityBuffer {
 	return tb
 }
 
-func (tb *TrippleEntityBuffer) WriteBuffer() *[]rl.Vector2 {
+func (tb *TrippleEntityBuffer) WriteBuffer() *[]InstanceData {
 	return &tb.buffers[tb.wrIdx]
 }
 
-func (tb *TrippleEntityBuffer) ReadBuffer() []rl.Vector2 {
+func (tb *TrippleEntityBuffer) ReadBuffer() []InstanceData {
 	return tb.buffers[tb.rdIdx]
 }
 
@@ -73,28 +79,29 @@ type SpriteRenderer struct {
 	vao         uint32
 	quadVBO     uint32
 	ebo         uint32
-	spriteVBO   uint32 // static — sprite indices, set once
-	positionVBO uint32 // dynamic — positions, updated per frame
+	instanceVBO uint32
 	mvpLoc      int32
 	cellSizeLoc int32
 	textureLoc  int32
 	texture     rl.Texture2D
-	entityCount int32
+	visibleCount int32
 	tb          *TrippleEntityBuffer
 }
 
 type SpriteRendererSystem struct {
-	filter        *ecs.Filter2[Position, Sprite]
-	tb            *TrippleEntityBuffer
+	filter       *ecs.Filter2[Position, Sprite]
+	tb           *TrippleEntityBuffer
+	cameraBounds *atomic.Pointer[CameraBounds]
 	RenderedCount int
 }
 
-func NewSpriteRendererSystem(w *ecs.World, tb *TrippleEntityBuffer) *SpriteRendererSystem {
+func NewSpriteRendererSystem(w *ecs.World, tb *TrippleEntityBuffer, cameraBounds *atomic.Pointer[CameraBounds]) *SpriteRendererSystem {
 	filter := ecs.NewFilter2[Position, Sprite](w)
 
 	return &SpriteRendererSystem{
-		filter: filter,
-		tb:     tb,
+		filter:       filter,
+		tb:           tb,
+		cameraBounds: cameraBounds,
 	}
 }
 
@@ -102,30 +109,31 @@ func (s *SpriteRendererSystem) Update(w *ecs.World) {
 	buf := s.tb.WriteBuffer()
 	*buf = (*buf)[:0]
 
+	bounds := s.cameraBounds.Load()
+	margin := float32(CellSize)
+	minX := bounds.MinX - margin
+	maxX := bounds.MaxX + margin
+	minY := bounds.MinY - margin
+	maxY := bounds.MaxY + margin
+
 	query := s.filter.Query()
 	for query.Next() {
-		pos, _ := query.Get()
-		*buf = append(*buf, rl.NewVector2(pos.X, pos.Y))
+		pos, sprite := query.Get()
+		if pos.X < minX || pos.X > maxX || pos.Y < minY || pos.Y > maxY {
+			continue
+		}
+		*buf = append(*buf, InstanceData{
+			X:           pos.X,
+			Y:           pos.Y,
+			SpriteIndex: float32(sprite.Y*GridCols + sprite.X),
+		})
 	}
 
 	s.RenderedCount = len(*buf)
 	s.tb.SwapWriter()
 }
 
-// BuildSpriteIndices iterates all entities once at startup and returns sprite indices for the static VBO.
-func (s *SpriteRendererSystem) BuildSpriteIndices(w *ecs.World) []float32 {
-	query := s.filter.Query()
-	indices := make([]float32, 0, s.RenderedCount)
-
-	for query.Next() {
-		_, sprite := query.Get()
-		indices = append(indices, float32(sprite.Y*GridCols+sprite.X))
-	}
-
-	return indices
-}
-
-func NewSpriteRenderer(tb *TrippleEntityBuffer, sheet rl.Texture2D, spriteIndices []float32, entityCount int32) *SpriteRenderer {
+func NewSpriteRenderer(tb *TrippleEntityBuffer, sheet rl.Texture2D, maxInstances int32) *SpriteRenderer {
 	// Load shader from files
 	vsCode, err := os.ReadFile("shaders/instancing.vs")
 	if err != nil {
@@ -172,42 +180,34 @@ func NewSpriteRenderer(tb *TrippleEntityBuffer, sheet rl.Texture2D, spriteIndice
 	// EBO (static)
 	ebo := rl.LoadVertexBufferElements(quadIndices, false)
 
-	// Sprite index VBO (static, divisor=1) — location=2, 1 float per instance
-	spriteVBO := rl.LoadVertexBuffer(spriteIndices, false)
-	rl.SetVertexAttribute(2, 1, rl.Float, false, 4, 0)
+	// Instance VBO (dynamic, divisor=1) — location=2, vec3 (posX, posY, spriteIndex) per instance
+	instanceData := make([]InstanceData, maxInstances)
+	instanceVBO := rl.LoadVertexBuffer(instanceData, true)
+	rl.SetVertexAttribute(2, 3, rl.Float, false, 12, 0)
 	rl.EnableVertexAttribute(2)
 	rl.SetVertexAttributeDivisor(2, 1)
-
-	// Position VBO (dynamic, divisor=1) — location=3, 2 floats (vec2) per instance
-	positionData := make([]rl.Vector2, entityCount)
-	positionVBO := rl.LoadVertexBuffer(positionData, true)
-	rl.SetVertexAttribute(3, 2, rl.Float, false, 8, 0)
-	rl.EnableVertexAttribute(3)
-	rl.SetVertexAttributeDivisor(3, 1)
 
 	rl.DisableVertexArray()
 
 	return &SpriteRenderer{
-		shaderID:    shaderID,
-		vao:         vao,
-		quadVBO:     quadVBO,
-		ebo:         ebo,
-		spriteVBO:   spriteVBO,
-		positionVBO: positionVBO,
-		mvpLoc:      mvpLoc,
-		cellSizeLoc: cellSizeLoc,
-		textureLoc:  textureLoc,
-		texture:     sheet,
-		entityCount: entityCount,
-		tb:          tb,
+		shaderID:     shaderID,
+		vao:          vao,
+		quadVBO:      quadVBO,
+		ebo:          ebo,
+		instanceVBO:  instanceVBO,
+		mvpLoc:       mvpLoc,
+		cellSizeLoc:  cellSizeLoc,
+		textureLoc:   textureLoc,
+		texture:      sheet,
+		visibleCount: 0,
+		tb:           tb,
 	}
 }
 
 func (s *SpriteRenderer) Unload() {
 	rl.UnloadVertexBuffer(s.quadVBO)
 	rl.UnloadVertexBuffer(s.ebo)
-	rl.UnloadVertexBuffer(s.spriteVBO)
-	rl.UnloadVertexBuffer(s.positionVBO)
+	rl.UnloadVertexBuffer(s.instanceVBO)
 	rl.UnloadShaderProgram(s.shaderID)
 }
 
@@ -225,18 +225,21 @@ func (s *SpriteRenderer) Render() {
 	rl.ActiveTextureSlot(0)
 	rl.EnableTexture(s.texture.ID)
 
-	// Upload new position data if available
+	// Upload new instance data if available
 	if s.tb.SwapReader() {
-		positions := s.tb.ReadBuffer()
-		if len(positions) > 0 {
-			rl.UpdateVertexBuffer(s.positionVBO, positions, 0)
+		instances := s.tb.ReadBuffer()
+		s.visibleCount = int32(len(instances))
+		if s.visibleCount > 0 {
+			rl.UpdateVertexBuffer(s.instanceVBO, instances, 0)
 		}
 	}
 
 	// Draw instanced
-	rl.EnableVertexArray(s.vao)
-	rl.DrawVertexArrayElementsInstanced(0, 6, nil, s.entityCount)
-	rl.DisableVertexArray()
+	if s.visibleCount > 0 {
+		rl.EnableVertexArray(s.vao)
+		rl.DrawVertexArrayElementsInstanced(0, 6, nil, s.visibleCount)
+		rl.DisableVertexArray()
+	}
 
 	rl.DisableTexture()
 	rl.DisableShader()
