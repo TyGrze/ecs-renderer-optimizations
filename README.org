@@ -3,7 +3,7 @@
 
 * Overview
 
-This project documents the step-by-step optimization of a 2D sprite renderer built with Go, [[https://github.com/mlange-42/ark][Ark ECS]], and [[https://github.com/gen2brain/raylib-go][raylib-go]]. Starting from a naive immediate-mode renderer drawing 100K entities, each iteration targets a specific bottleneck until the final version renders *1 million entities* with a single draw call, lock-free triple buffering, and direct OpenGL control.
+This project documents the step-by-step optimization of a 2D sprite renderer built with Go, [[https://github.com/mlange-42/ark][Ark ECS]], and [[https://github.com/gen2brain/raylib-go][raylib-go]]. Starting from a naive immediate-mode renderer drawing 100K entities, each iteration targets a specific bottleneck until the final version renders *1 million entities* with a single draw call, lock-free triple buffering, and direct OpenGL control requiring a merge in the upstream [[https://github.com/gen2brain/raylib-go/pull/537][raylib-go library]]
 
 ** Tech Stack
 
