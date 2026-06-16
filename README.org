@@ -173,21 +173,6 @@ Position and sprite index are packed into a single =vec3= per instance (12 bytes
 |    5 | 800K     | 1          | 8                | Direct OpenGL (PR #537)      |
 |    6 | 1M       | 1          | 12 (visible only)| ECS-side culling + merged VBO|
 
-* Architecture
-
-#+begin_example
-ECS Goroutine (60Hz)                    Main Thread (120Hz)
-┌───────────────────────┐               ┌──────────────────────┐
-│  MovementSystem       │               │  Camera Update       │
-│  ├── Update positions │               │  ├── WASD panning    │
-│                       │               │  └── Mouse zoom      │
-│  SpriteRendererSystem │               │                      │
-│  ├── Load cam bounds  │  lock-free    │  SpriteRenderer      │
-│  ├── AABB cull        ├──────────────►│  ├── SwapReader()    │
-│  ├── Pack InstanceData│ triple buffer │  ├── UpdateVBO       │
-│  └── SwapWriter()     │               │  └── DrawInstanced   │
-└───────────────────────┘               └──────────────────────┘
-#+end_example
 
 ** File Structure
 
